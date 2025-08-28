@@ -1,6 +1,6 @@
 // DataviewJS Block
 
-const daysAgo = 2;
+const daysAgo = 1;
 dv.header(2, `${daysAgo} days ago:`);
 
 async function sendToAPI(prompt, placeholder) {
@@ -274,17 +274,18 @@ Respond ONLY with the JSON object, no additional text.`;
 }
 
 function getNotes(daysOld) {
-  const today = new Date();
-  const targetDay = new Date(today);
-  targetDay.setDate(today.getDate() - daysOld);
+  const now = Date.now();
+  const msDay = 24 * 60 * 60 * 1000;
 
-  // Set the time to the start of the day for both dates
-  targetDay.setHours(0, 0, 0, 0);
-  const targetCutoff = new Date(targetDay);
-  targetCutoff.setDate(targetDay.getDate() - 1);
+  const upper = now - daysOld * msDay; // e.g. now - 24h
+  const lower = now - (daysOld + 1) * msDay; // e.g. now - 48h
 
-  // Query for notes modified exactly 4 days ago
-  return dv.pages().where(p => p.file.mtime >= targetCutoff && p.file.mtime < targetDay);
+  return dv.pages().where(p => {
+    const ctime = new Date(p.file.ctime).getTime();
+    const mtime = new Date(p.file.mtime).getTime();
+    const lastActivity = Math.max(ctime, mtime);
+    return lastActivity >= lower && lastActivity < upper;
+  });
 }
 
 const notes = getNotes(daysAgo);

@@ -281,6 +281,9 @@ function getNotes(daysOld) {
   const lower = now - (daysOld + 1) * msDay; // e.g. now - 48h
 
   return dv.pages().where(p => {
+    const name = p.file.name.toUpperCase();
+    if (name.includes('DAYS AGO') || name.includes('DAY AGO')) return false; // Exclude files with "Days Old" in the name
+
     const ctime = new Date(p.file.ctime).getTime();
     const mtime = new Date(p.file.mtime).getTime();
     const lastActivity = Math.max(ctime, mtime);

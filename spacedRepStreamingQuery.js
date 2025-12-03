@@ -1,12 +1,24 @@
 // DataviewJS Block
 
+const DEFAULT_MODEL = 'gpt-oss-20b'
 const daysAgo = 1;
 dv.header(2, `${daysAgo} days ago:`);
+
+function getModelName() {
+  const page = dv.current();
+  try {
+    const tags = page.file.tags;
+    const modelName = tags[0].slice(1); // Slice off the '#'
+    return modelName;
+  } catch (error) {
+    return DEFAULT_MODEL;
+  }
+}
 
 async function sendToAPI(prompt, placeholder) {
   const url = 'http://localhost:11434/api/generate';
   const payload = {
-    model: 'mistral-nemo:latest',
+    model: getModelName(),
     prompt: prompt,
     temperature: 0.01,
     stream: true, // Enable streaming

@@ -1,6 +1,6 @@
 // DataviewJS Block
 
-const DEFAULT_MODEL = 'gpt-oss-20b'
+const DEFAULT_MODEL = 'gpt-oss-20b';
 const daysAgo = 1;
 dv.header(2, `${daysAgo} days ago:`);
 
@@ -19,6 +19,7 @@ async function sendToAPI(prompt, placeholder) {
   const url = 'http://localhost:11434/api/generate';
   const payload = {
     model: getModelName(),
+    format: 'json',
     prompt: prompt,
     temperature: 0.01,
     stream: true, // Enable streaming
@@ -130,9 +131,10 @@ function renderQuizUI(quizData, placeholder) {
   // Get the parent container where we want to insert the quiz
   const parentContainer = placeholder.parentNode;
 
-  // Create a question paragraph and insert it before the placeholder
-  const questionEl = document.createElement('p');
-  questionEl.textContent = quizData.question;
+  // Create a question element and insert it before the placeholder
+  // Use dv.el to render Markdown/LaTeX (which initially appends to bottom),
+  // then move it to the correct position
+  const questionEl = dv.el('div', quizData.question);
   parentContainer.insertBefore(questionEl, placeholder);
 
   // Create a container div and insert it before the placeholder
@@ -172,9 +174,12 @@ function renderQuizUI(quizData, placeholder) {
     radio.addEventListener('click', selectThisRadio);
 
     const label = radioDiv.createEl('label', {
-      text: option,
       attr: { for: `option-${uniqueId}-${index}` },
     });
+
+    // Render option text with Markdown/Math support and move inside label
+    const optionSpan = dv.span(option);
+    label.appendChild(optionSpan);
 
     // Add click handler to label to also select the radio button
     label.addEventListener('click', event => {

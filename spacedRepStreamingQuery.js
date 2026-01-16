@@ -1,60 +1,90 @@
 // DataviewJS Block
 
-const DEFAULT_MODEL = 'gpt-oss-20b';
+const MODEL = 'gpt-oss:20b';
 const daysAgo = 1;
 dv.header(2, `${daysAgo} days ago:`);
-
-function getModelName() {
-  const page = dv.current();
-  try {
-    const tags = page.file.tags;
-    const modelName = tags[0].slice(1); // Slice off the '#'
-    return modelName;
-  } catch (error) {
-    return DEFAULT_MODEL;
-  }
-}
 
 async function sendToAPI(prompt, placeholder) {
   const url = 'http://localhost:11434/api/generate';
   const payload = {
-    model: getModelName(),
-    format: 'json',
+    model: MODEL,
     prompt: prompt,
     temperature: 0.01,
     stream: true, // Enable streaming
   };
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
+  let response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  } catch (networkError) {
+    console.error('Network error contacting Ollama:', networkError);
+    if (placeholder) {
+      placeholder.innerText = 'Failed to reach Ollama at http://localhost:11434. Is it running?';
+    }
+    return;
+  }
 
   if (!response.ok) {
-    console.error('Failed to send data:', response.statusText);
-    placeholder.innerText = 'Failed to load response.';
+    let errorText = '';
+    try {
+      errorText = await response.text();
+    } catch (_) {}
+    console.error('Failed to send data:', response.status, response.statusText, errorText);
+    if (placeholder) {
+      placeholder.innerText = `Failed to load response (${response.status}). ${
+        errorText || response.statusText
+      }`;
+    }
     return;
+  }
+
+  // Update placeholder to show request was sent
+  if (placeholder && placeholder.innerText !== undefined) {
+    placeholder.innerText = 'Request sent...waiting for response';
   }
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let result = '';
+  let rawText = '';
+  let chunkCount = 0;
+  let totalResponseLength = 0;
 
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
 
     const chunk = decoder.decode(value, { stream: true });
+    rawText += chunk;
 
     // Handle multiple JSON objects per chunk
     const lines = chunk.split('\n').filter(line => line.trim());
 
-    for (const line of lines) {
+    for (let line of lines) {
+      // Handle potential Server-Sent Events style prefix
+      const trimmed = line.trim();
+      if (trimmed.startsWith('data:')) {
+        line = trimmed.slice(5).trim(); // remove 'data:' prefix
+      }
       try {
         const json = JSON.parse(line);
+        chunkCount++;
+
+        // Debug logging for each chunk
+        console.log(`Chunk ${chunkCount}:`, {
+          hasResponse: !!json.response,
+          responseLength: json.response?.length || 0,
+          isDone: json.done,
+          keys: Object.keys(json)
+        });
+
         if (json.response) {
           result += json.response;
+          totalResponseLength += json.response.length;
         }
       } catch (parseError) {
         // Skip malformed JSON chunks
@@ -65,8 +95,17 @@ async function sendToAPI(prompt, placeholder) {
     // Update the specific placeholder's text content instead of creating new paragraphs
     if (placeholder && placeholder.innerText !== undefined) {
       placeholder.innerText = 'Loading...';
+      placeholder.classList.add('quiz-loading');
     }
   }
+
+  // Log final stats
+  console.log('Streaming complete:', {
+    totalChunks: chunkCount,
+    totalResponseLength: totalResponseLength,
+    resultLength: result.length,
+    rawTextLength: rawText.length
+  });
 
   // After streaming is complete, parse and display the multiple choice question
   try {
@@ -82,7 +121,30 @@ async function sendToAPI(prompt, placeholder) {
   } catch (error) {
     console.error('Failed to parse JSON response:', error);
     if (placeholder) {
-      placeholder.innerText = 'Error: Could not parse the response as valid JSON.';
+      const parent = placeholder.parentNode;
+      const container = document.createElement('div');
+      container.classList.add('quiz-error');
+
+      const msg = document.createElement('div');
+      msg.classList.add('quiz-error-title');
+      msg.textContent = 'Received non-JSON output. Showing raw response below.';
+
+      const pre = document.createElement('pre');
+      pre.classList.add('quiz-error-content');
+      const MAX_LEN = 10000;
+      const toShow = result && result.length > 0 ? result : rawText;
+      const isTruncated = toShow.length > MAX_LEN;
+      pre.textContent = isTruncated ? toShow.slice(0, MAX_LEN) + '\n... [truncated]' : toShow;
+
+      container.appendChild(msg);
+      container.appendChild(pre);
+
+      if (parent) {
+        parent.insertBefore(container, placeholder);
+        parent.removeChild(placeholder);
+      } else {
+        placeholder.innerText = msg.textContent + '\n\n' + (pre.textContent || '[no content]');
+      }
     }
   }
 }
@@ -102,6 +164,10 @@ function parseJSONResponse(response) {
   }
 
   jsonStr = jsonStr.substring(startIndex, endIndex + 1);
+
+  // Fix unescaped backslashes (common with LaTeX output)
+  // Replace \ not followed by valid JSON escape chars with \\
+  jsonStr = jsonStr.replace(/\\(?!["\\/bfnrtu])/g, '\\\\');
 
   try {
     const parsed = JSON.parse(jsonStr);
@@ -128,90 +194,239 @@ function parseJSONResponse(response) {
 }
 
 function renderQuizUI(quizData, placeholder) {
-  // Get the parent container where we want to insert the quiz
   const parentContainer = placeholder.parentNode;
+  const uniqueId = Date.now();
 
-  // Create a question element and insert it before the placeholder
-  // Use dv.el to render Markdown/LaTeX (which initially appends to bottom),
-  // then move it to the correct position
+  // Inline styles for guaranteed rendering
+  const styles = {
+    container: `
+      margin: 1.5rem 0;
+      padding: 1.5rem;
+      background: var(--background-secondary);
+      border-radius: 16px;
+      border: 1px solid var(--background-modifier-border);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    `,
+    question: `
+      font-size: 1.15em;
+      font-weight: 600;
+      margin-bottom: 1.5rem;
+      line-height: 1.6;
+    `,
+    optionsContainer: `
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+      margin-bottom: 1.5rem;
+    `,
+    option: `
+      display: flex;
+      flex-direction: row;
+      align-items: center;
+      padding: 1rem 1.25rem;
+      background: var(--background-primary);
+      border: 2px solid var(--background-modifier-border);
+      border-radius: 12px;
+      cursor: pointer;
+      transition: all 0.25s ease;
+      user-select: none;
+    `,
+    optionHover: `
+      border-color: var(--interactive-accent);
+      transform: translateX(8px);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    `,
+    optionSelected: `
+      border-color: var(--interactive-accent);
+      background: color-mix(in srgb, var(--interactive-accent) 12%, var(--background-primary));
+      transform: translateX(8px);
+      box-shadow: 0 4px 16px color-mix(in srgb, var(--interactive-accent) 30%, transparent);
+    `,
+    radioHidden: `
+      display: none;
+    `,
+    radioIndicator: `
+      width: 24px;
+      height: 24px;
+      min-width: 24px;
+      border: 2px solid var(--text-muted);
+      border-radius: 50%;
+      margin-right: 1rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.3s ease;
+      flex-shrink: 0;
+      position: relative;
+    `,
+    radioIndicatorSelected: `
+      border-color: var(--interactive-accent);
+      background: color-mix(in srgb, var(--interactive-accent) 20%, transparent);
+    `,
+    radioIndicatorCorrect: `
+      border-color: #22c55e;
+      background: #22c55e;
+    `,
+    radioIndicatorIncorrect: `
+      border-color: #ef4444;
+      background: #ef4444;
+    `,
+    optionText: `
+      flex: 1;
+      line-height: 1.5;
+    `,
+    button: `
+      padding: 0.875rem 2rem;
+      font-size: 1em;
+      font-weight: 600;
+      color: var(--text-on-accent);
+      background: var(--interactive-accent);
+      border: none;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: all 0.3s ease;
+    `,
+    buttonDisabled: `
+      opacity: 0.5;
+      cursor: default;
+    `,
+    result: `
+      margin-top: 1.25rem;
+      padding: 1.25rem;
+      border-radius: 12px;
+      font-weight: 600;
+      font-size: 1.05em;
+      text-align: center;
+    `,
+    resultCorrect: `
+      background: rgba(34, 197, 94, 0.15);
+      color: #22c55e;
+      border: 2px solid #22c55e;
+    `,
+    resultIncorrect: `
+      background: rgba(239, 68, 68, 0.15);
+      color: #ef4444;
+      border: 2px solid #ef4444;
+    `,
+    resultWarning: `
+      background: rgba(245, 158, 11, 0.15);
+      color: #f59e0b;
+      border: 2px solid #f59e0b;
+    `,
+    optionCorrect: `
+      border-color: #22c55e;
+      background: rgba(34, 197, 94, 0.15);
+      box-shadow: 0 0 20px rgba(34, 197, 94, 0.4);
+    `,
+    optionIncorrect: `
+      border-color: #ef4444;
+      background: rgba(239, 68, 68, 0.15);
+      box-shadow: 0 0 20px rgba(239, 68, 68, 0.4);
+    `,
+    optionFaded: `
+      opacity: 0.4;
+      filter: grayscale(50%);
+    `
+  };
+
+  // Create main quiz container
+  const quizContainer = document.createElement('div');
+  quizContainer.style.cssText = styles.container;
+  parentContainer.insertBefore(quizContainer, placeholder);
+
+  // Create question element
   const questionEl = dv.el('div', quizData.question);
-  parentContainer.insertBefore(questionEl, placeholder);
+  questionEl.style.cssText = styles.question;
+  quizContainer.appendChild(questionEl);
 
-  // Create a container div and insert it before the placeholder
-  const container = document.createElement('div');
-  parentContainer.insertBefore(container, placeholder);
+  // Create options container
+  const optionsContainer = document.createElement('div');
+  optionsContainer.style.cssText = styles.optionsContainer;
+  quizContainer.appendChild(optionsContainer);
 
-  // Store references to radio buttons
+  // Store references
+  const optionElements = [];
+  const radioIndicators = [];
   const radioButtons = [];
 
-  // Create radio buttons for each option with a unique name for this quiz
-  const uniqueId = Date.now(); // Create unique identifier for this quiz
   quizData.options.forEach((option, index) => {
-    const radioDiv = container.createEl('div');
-    const radio = radioDiv.createEl('input', {
-      type: 'radio',
-      name: `quiz-option-${uniqueId}`,
-      value: String(index),
-      id: `option-${uniqueId}-${index}`,
-    });
+    // Option container - FORCE HORIZONTAL LAYOUT
+    const optionDiv = document.createElement('div');
+    optionDiv.style.cssText = styles.option;
+    optionsContainer.appendChild(optionDiv);
+    optionElements.push(optionDiv);
 
-    // Store reference to radio button
+    // Hidden radio button
+    const radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.name = `quiz-option-${uniqueId}`;
+    radio.value = String(index);
+    radio.style.cssText = styles.radioHidden;
+    optionDiv.appendChild(radio);
     radioButtons.push(radio);
 
-    // Function to select this radio button
-    const selectThisRadio = () => {
-      // Deselect all other radio buttons in this group
-      radioButtons.forEach(btn => {
-        if (btn !== radio) {
-          btn.checked = false;
+    // Custom radio indicator
+    const radioIndicator = document.createElement('div');
+    radioIndicator.style.cssText = styles.radioIndicator;
+    optionDiv.appendChild(radioIndicator);
+    radioIndicators.push(radioIndicator);
+
+    // Option text
+    const optionText = document.createElement('span');
+    optionText.style.cssText = styles.optionText;
+    optionText.textContent = option;
+    optionDiv.appendChild(optionText);
+
+    // Hover effects
+    optionDiv.addEventListener('mouseenter', () => {
+      if (!optionsContainer.dataset.answered) {
+        optionDiv.style.cssText = styles.option + styles.optionHover;
+      }
+    });
+    optionDiv.addEventListener('mouseleave', () => {
+      if (!optionsContainer.dataset.answered) {
+        if (radio.checked) {
+          optionDiv.style.cssText = styles.option + styles.optionSelected;
+        } else {
+          optionDiv.style.cssText = styles.option;
         }
+      }
+    });
+
+    // Click handler
+    optionDiv.addEventListener('click', () => {
+      if (optionsContainer.dataset.answered) return;
+
+      // Deselect all
+      optionElements.forEach((el, i) => {
+        el.style.cssText = styles.option;
+        radioIndicators[i].style.cssText = styles.radioIndicator;
+        radioButtons[i].checked = false;
       });
-      // Ensure this radio button is selected
+      // Select this one
+      optionDiv.style.cssText = styles.option + styles.optionSelected;
+      radioIndicator.style.cssText = styles.radioIndicator + styles.radioIndicatorSelected;
       radio.checked = true;
-    };
-
-    // Add click handler to radio button
-    radio.addEventListener('click', selectThisRadio);
-
-    const label = radioDiv.createEl('label', {
-      attr: { for: `option-${uniqueId}-${index}` },
     });
-
-    // Render option text with Markdown/Math support and move inside label
-    const optionSpan = dv.span(option);
-    label.appendChild(optionSpan);
-
-    // Add click handler to label to also select the radio button
-    label.addEventListener('click', event => {
-      event.preventDefault();
-      selectThisRadio();
-    });
-
-    // Make label appear clickable
-    label.style.cursor = 'pointer';
-    label.style.userSelect = 'none'; // Prevent text selection when clicking
-
-    // Add some spacing between options
-    radioDiv.style.margin = '8px 0';
   });
 
-  // Add check button
-  const checkButton = container.createEl('button', {
-    text: 'Check Answer',
-    attr: { type: 'button' },
-  });
+  // Check button
+  const checkButton = document.createElement('button');
+  checkButton.type = 'button';
+  checkButton.textContent = 'Check Answer';
+  checkButton.style.cssText = styles.button;
+  quizContainer.appendChild(checkButton);
 
-  // Add result display area
-  const resultDiv = container.createEl('div');
-  resultDiv.id = `result-${uniqueId}`;
-  resultDiv.style.marginTop = '10px';
-  resultDiv.style.fontWeight = 'bold';
+  // Result div
+  const resultDiv = document.createElement('div');
+  resultDiv.style.cssText = styles.result;
+  resultDiv.style.display = 'none';
+  quizContainer.appendChild(resultDiv);
 
-  // Add click handler for the check button
+  // Check button handler
   checkButton.addEventListener('click', event => {
     event.preventDefault();
 
-    // Check radio buttons directly using our stored references
     let selectedIndex = -1;
     for (let i = 0; i < radioButtons.length; i++) {
       if (radioButtons[i].checked) {
@@ -222,70 +437,91 @@ function renderQuizUI(quizData, placeholder) {
 
     if (selectedIndex === -1) {
       resultDiv.textContent = 'Please select an answer!';
-      resultDiv.style.color = 'orange';
+      resultDiv.style.cssText = styles.result + styles.resultWarning;
+      resultDiv.style.display = 'block';
       return;
     }
 
+    // Mark as answered
+    optionsContainer.dataset.answered = 'true';
+    checkButton.style.cssText = styles.button + styles.buttonDisabled;
+    checkButton.disabled = true;
+
+    // Fade non-selected options
+    optionElements.forEach((el, i) => {
+      if (i !== selectedIndex && i !== quizData.correctIndex) {
+        el.style.cssText = styles.option + styles.optionFaded;
+      }
+    });
+
     if (selectedIndex === quizData.correctIndex) {
-      resultDiv.textContent = 'Correct! ✓';
-      resultDiv.style.color = 'green';
+      // Correct!
+      optionElements[selectedIndex].style.cssText = styles.option + styles.optionCorrect;
+      radioIndicators[selectedIndex].style.cssText = styles.radioIndicator + styles.radioIndicatorCorrect;
+      resultDiv.textContent = 'Correct!';
+      resultDiv.style.cssText = styles.result + styles.resultCorrect;
     } else {
-      resultDiv.textContent = `Incorrect. The correct answer is: ${
-        quizData.options[quizData.correctIndex]
-      }`;
-      resultDiv.style.color = 'red';
+      // Incorrect
+      optionElements[selectedIndex].style.cssText = styles.option + styles.optionIncorrect;
+      radioIndicators[selectedIndex].style.cssText = styles.radioIndicator + styles.radioIndicatorIncorrect;
+      optionElements[quizData.correctIndex].style.cssText = styles.option + styles.optionCorrect;
+      radioIndicators[quizData.correctIndex].style.cssText = styles.radioIndicator + styles.radioIndicatorCorrect;
+      resultDiv.textContent = `Incorrect. The correct answer was: ${quizData.options[quizData.correctIndex]}`;
+      resultDiv.style.cssText = styles.result + styles.resultIncorrect;
     }
+    resultDiv.style.display = 'block';
   });
 }
 
 function createPrompt(title, content) {
-  return `You are creating a spaced repetition quiz question based on specific study notes. Your goal is to test deep understanding of the actual content provided, not general knowledge.
+  return `You are creating a spaced repetition quiz question based on the topic and any high-level notes. Your goal is to test general knowledge and understanding of the subject — not specific examples from the notes.
 
-CRITICAL ACCURACY REQUIREMENT:
+QUESTION SCOPE:
+- Prefer general concepts, mechanisms, definitions, and relationships within the topic
+- Use the note content to set scope/terminology, but avoid referencing specific examples, quotes, or exact numbers from the note
+- If notes are sparse, rely on general knowledge of the topic (the note's title) to craft an interesting question
+
+ACCURACY REQUIREMENT:
 - The correct_index MUST point to the factually correct answer
-- Double-check your answer selection before responding
-- If unsure about correctness, choose a different question approach
-- Wrong answers should be plausible but clearly incorrect based on facts
+- Double-check correctness before responding
+- Distractors should be plausible yet clearly incorrect
 
-IMPORTANT GUIDELINES:
-- Focus on SPECIFIC facts, concepts, and details mentioned in the notes
-- Avoid basic definitional questions that could be answered without reading the notes
-- Create questions that require understanding of the relationships, mechanisms, or specific examples provided
-- Test comprehension of nuanced details rather than surface-level information
-- If the notes contain specific numbers, examples, or case studies, incorporate them
+STYLE GUIDELINES:
+- Make the question engaging and thought-provoking
+- Avoid niche trivia unless the topic naturally requires it
+- Math allowed; format with LaTeX where helpful
 
 Topic: ${title}
 
-Study Notes:
+Study Notes (context only; do not reference specific examples):
 <notes>${content}</notes>
 
-TASK: Create a challenging multiple choice question that tests understanding of SPECIFIC information from these notes. The question should be something that someone couldn't answer correctly just from general knowledge - they would need to have studied these particular notes.
+TASK: Create a multiple choice question that tests general knowledge of this topic, consistent with any terminology in the notes but not dependent on specific examples from the notes.
 
 Requirements:
-- Question must be directly answerable from the note content
-- Focus on specific details, relationships, or mechanisms mentioned
-- Include 4-5 plausible options where incorrect answers are reasonable but clearly wrong based on the notes
-- Make the correct answer require careful reading and understanding of the notes
-- VERIFY that your correct_index points to the actually correct answer
+- Standalone question (answerable without reading the exact note details)
+- Avoid asking about specific examples, exact numbers, or quotations in the notes
+- Include 4-5 plausible options
+- Set correct_index to the position (0-based) of the correct answer
 
-QUALITY CHECK PROCESS:
-1. Write your question and options
+QUALITY CHECK:
+1. Write question and options
 2. Verify which option is factually correct
-3. Set correct_index to that option's position (0-based)
-4. Double-check that the correct_index matches the right answer
+3. Set correct_index accordingly
+4. Re-check alignment
 
 Respond with valid JSON in exactly this format:
 
 {
-    "question": "your specific, detail-oriented question here",
+    "question": "your general-knowledge question here",
     "options": ["option 1", "option 2", "option 3", "option 4"],
     "correct_index": 0
 }
 
 Where:
-- question: A specific question testing detailed understanding of the note content
-- options: 4-5 options with plausible distractors based on the subject matter
-- correct_index: The index (0-based) of the FACTUALLY CORRECT answer (double-check this!)
+- question: Tests general understanding of the topic
+- options: 4-5 plausible choices
+- correct_index: 0-based index of the correct answer
 
 Respond ONLY with the JSON object, no additional text.`;
 }
@@ -317,7 +553,7 @@ if (!notes || notes.length === 0) {
   const noteSections = [];
   for (const note of notes) {
     dv.header(4, note.file.name);
-    let placeholder = dv.paragraph('Loading response...');
+    let placeholder = dv.paragraph('Waiting to send request...');
     noteSections.push({
       note: note,
       placeholder: placeholder,

@@ -79,7 +79,7 @@ async function sendToAPI(prompt, placeholder) {
           hasResponse: !!json.response,
           responseLength: json.response?.length || 0,
           isDone: json.done,
-          keys: Object.keys(json)
+          keys: Object.keys(json),
         });
 
         if (json.response) {
@@ -104,7 +104,7 @@ async function sendToAPI(prompt, placeholder) {
     totalChunks: chunkCount,
     totalResponseLength: totalResponseLength,
     resultLength: result.length,
-    rawTextLength: rawText.length
+    rawTextLength: rawText.length,
   });
 
   // After streaming is complete, parse and display the multiple choice question
@@ -326,7 +326,7 @@ function renderQuizUI(quizData, placeholder) {
     optionFaded: `
       opacity: 0.4;
       filter: grayscale(50%);
-    `
+    `,
   };
 
   // Create main quiz container
@@ -457,15 +457,18 @@ function renderQuizUI(quizData, placeholder) {
     if (selectedIndex === quizData.correctIndex) {
       // Correct!
       optionElements[selectedIndex].style.cssText = styles.option + styles.optionCorrect;
-      radioIndicators[selectedIndex].style.cssText = styles.radioIndicator + styles.radioIndicatorCorrect;
+      radioIndicators[selectedIndex].style.cssText =
+        styles.radioIndicator + styles.radioIndicatorCorrect;
       resultDiv.textContent = 'Correct!';
       resultDiv.style.cssText = styles.result + styles.resultCorrect;
     } else {
       // Incorrect
       optionElements[selectedIndex].style.cssText = styles.option + styles.optionIncorrect;
-      radioIndicators[selectedIndex].style.cssText = styles.radioIndicator + styles.radioIndicatorIncorrect;
+      radioIndicators[selectedIndex].style.cssText =
+        styles.radioIndicator + styles.radioIndicatorIncorrect;
       optionElements[quizData.correctIndex].style.cssText = styles.option + styles.optionCorrect;
-      radioIndicators[quizData.correctIndex].style.cssText = styles.radioIndicator + styles.radioIndicatorCorrect;
+      radioIndicators[quizData.correctIndex].style.cssText =
+        styles.radioIndicator + styles.radioIndicatorCorrect;
       resultDiv.textContent = `Incorrect. The correct answer was: ${quizData.options[quizData.correctIndex]}`;
       resultDiv.style.cssText = styles.result + styles.resultIncorrect;
     }
@@ -474,73 +477,70 @@ function renderQuizUI(quizData, placeholder) {
 }
 
 function createPrompt(title, content) {
-  return `You are creating a spaced repetition quiz question based on the topic and any high-level notes. Your goal is to test general knowledge and understanding of the subject — not specific examples from the notes.
+  const hasContent = content && content.trim().length > 50;
 
-QUESTION SCOPE:
-- Prefer general concepts, mechanisms, definitions, and relationships within the topic
-- Use the note content to set scope/terminology, but avoid referencing specific examples, quotes, or exact numbers from the note
-- If notes are sparse, rely on general knowledge of the topic (the note's title) to craft an interesting question
+  return `You are a skilled educator creating a spaced repetition question on the topic "${title}".
 
-ACCURACY REQUIREMENT:
-- The correct_index MUST point to the factually correct answer
-- Double-check correctness before responding
-- Distractors should be plausible yet clearly incorrect
-
-STYLE GUIDELINES:
-- Make the question engaging and thought-provoking
-- Avoid niche trivia unless the topic naturally requires it
-- Math allowed; format with LaTeX where helpful
-
-Topic: ${title}
-
-Study Notes (context only; do not reference specific examples):
-<notes>${content}</notes>
-
-TASK: Create a multiple choice question that tests general knowledge of this topic, consistent with any terminology in the notes but not dependent on specific examples from the notes.
-
-Requirements:
-- Standalone question (answerable without reading the exact note details)
-- Avoid asking about specific examples, exact numbers, or quotations in the notes
-- Include 4-5 plausible options
-- Set correct_index to the position (0-based) of the correct answer
-
-QUALITY CHECK:
-1. Write question and options
-2. Verify which option is factually correct
-3. Set correct_index accordingly
-4. Re-check alignment
-
-Respond with valid JSON in exactly this format:
-
-{
-    "question": "your general-knowledge question here",
-    "options": ["option 1", "option 2", "option 3", "option 4"],
-    "correct_index": 0
+${
+  hasContent
+    ? `The student's notes on this topic:
+<notes>
+${content}
+</notes>`
+    : `The student has a note titled "${title}" with minimal content. Use your knowledge of this subject.`
 }
 
-Where:
-- question: Tests general understanding of the topic
-- options: 4-5 plausible choices
-- correct_index: 0-based index of the correct answer
+QUESTION DESIGN — pick ONE of these styles (whichever fits best):
+1. **"Why" question**: Ask why something works the way it does, not just what it is.
+2. **Contrast**: "What distinguishes X from Y?" where Y is a commonly confused concept.
+3. **Application**: Present a concrete scenario and ask what happens or what approach applies.
+4. **Implication**: "If X were changed/removed, what consequence would follow?"
+5. **Connection**: Link this topic to a related concept from another area.
 
-Respond ONLY with the JSON object, no additional text.`;
+RULES:
+- The question must be ANSWERABLE by someone who understands the topic — no trick questions.
+- Distractors must be plausible (common misconceptions or adjacent truths) but clearly wrong.
+- If the topic involves math or formal notation, use LaTeX where it helps clarity.
+- Do NOT produce a question that is just a definition lookup ("What is X?"). Push deeper.
+- The correct answer must be unambiguously correct. Verify before responding.
+- Do NOT include any text outside the JSON object.
+
+OUTPUT FORMAT (strict JSON, nothing else):
+{"question":"...","options":["A","B","C","D"],"correct_index":0}
+
+- 4 options exactly
+- correct_index is 0-based
+- No markdown, no explanation, no preamble — ONLY the JSON object.`;
 }
 
 function getNotes(daysOld) {
-  const now = Date.now();
-  const msDay = 24 * 60 * 60 * 1000;
-
-  const upper = now - daysOld * msDay; // e.g. now - 24h
-  const lower = now - (daysOld + 1) * msDay; // e.g. now - 48h
+  const target = new Date();
+  target.setDate(target.getDate() - daysOld);
+  const lower = new Date(
+    target.getFullYear(),
+    target.getMonth(),
+    target.getDate(),
+    0,
+    0,
+    0,
+    0,
+  ).getTime();
+  const upper = new Date(
+    target.getFullYear(),
+    target.getMonth(),
+    target.getDate(),
+    23,
+    59,
+    59,
+    999,
+  ).getTime();
 
   return dv.pages().where(p => {
     const name = p.file.name.toUpperCase();
     if (name.includes('DAYS AGO') || name.includes('DAY AGO')) return false; // Exclude files with "Days Old" in the name
 
-    const ctime = new Date(p.file.ctime).getTime();
     const mtime = new Date(p.file.mtime).getTime();
-    const lastActivity = Math.max(ctime, mtime);
-    return lastActivity >= lower && lastActivity < upper;
+    return mtime >= lower && mtime <= upper;
   });
 }
 
